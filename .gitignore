@@ -1,2 +1,3 @@
 # all dotenv files
 *.env*
+.sql

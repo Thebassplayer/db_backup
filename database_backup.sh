@@ -38,8 +38,6 @@ fi
 ARG_CONN="${1:-}"
 ARG_OUT="${2:-}"
 
-
-
 # 5) Build timestamp
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 
@@ -86,17 +84,61 @@ backup_env() {
   # ── rotate old backups: delete SQL >30 days old in this env’s folder
   echo "$(date '+%Y-%m-%d %H:%M:%S') [CLEANUP] Removing $env_lower backups older than 30 days"
   find "${outfile%/*}" -type f -name "${env_lower}_backup_*.sql" -mtime +30 -delete
+
+  # Record outfile path for pruning
+  OUTFILE[$env]="$outfile"
 }
 
-
-# 7) Build the list of environments to back up
+# 7) Build the list of environments to back up, and record each outfile path
+declare -A OUTFILE
 if [ "$env" = "BOTH" ]; then
   envs=(PROD DEV)
 else
   envs=("$env")
 fi
+for e in "${envs[@]}"; do
+  env_lower=$(echo "$e" | tr '[:upper:]' '[:lower:]')
+  OUTFILE[$e]="${ARG_OUT:-${env_lower}/${env_lower}_backup_${TIMESTAMP}.sql}"
+done
 
 # 8) Run backup for each selected environment
 for e in "${envs[@]}"; do
   backup_env "$e" || exit 1
+done
+
+# 9) Prune oldest backups per environment to keep total ≤ 9.5 GiB
+# 9.5 GiB threshold in bytes
+threshold=$(((9*1024 + 512)*1024*1024))
+for e in "${envs[@]}"; do
+  env_lower=$(echo "$e" | tr '[:upper:]' '[:lower:]')
+  dir="$(dirname "${OUTFILE[$e]}")"
+
+  # Gather all backups in this env, sorted oldest→newest
+  mapfile -t files < <(
+    find "$dir" -type f -name "${env_lower}_backup_*.sql" \
+      -printf "%T@ %p\n" | sort -n | awk '{print $2}'
+  )
+
+  # Compute total size
+  total=0
+  for f in "${files[@]}"; do
+    (( total += $(stat -c %s "$f") ))
+  done
+
+  if (( total > threshold )); then
+    echo "WARNING: Total size of $env_lower backups $(numfmt --to=iec $total) exceeds 9.5 GiB. Pruning..."
+    for f in "${files[@]}"; do
+      (( total <= threshold )) && break
+      size=$(stat -c %s "$f")
+      rm -f "$f"
+      (( total -= size ))
+      echo "  • Deleted $(basename "$f") ($(numfmt --to=iec "$size")), new total $(numfmt --to=iec $total)"
+    done
+    if (( total > threshold )); then
+      echo "ERROR: Could not prune $env_lower backups under threshold." >&2
+      exit 1
+    else
+      echo "OK: $env_lower backups total size now $(numfmt --to=iec $total)."
+    fi
+  fi
 done

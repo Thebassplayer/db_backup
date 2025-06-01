@@ -3,3 +3,4 @@
 .sql
 gcp/
 ssh/
+backup.log
